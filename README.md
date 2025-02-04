@@ -11,4 +11,4 @@ The workflow:
 3.	Filter or subset the data to a cohort-of-interest by inputing tumor sample ID matching cbioportal (e.g., by tumor type).
 4.	Create arm-level CNA clustering plots and oncoprint plots using a combined function.
 
-Please find example.ipynb for details of usage.
+Please find `example.ipynb` for details of usage.
