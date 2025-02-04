@@ -1,3 +1,6 @@
+# Author: Jierui Xu
+# Date: 2025-02-03
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.collections as mc
@@ -9,27 +12,12 @@ from matplotlib.colors import ListedColormap
 from matplotlib.collections import PatchCollection
 import matplotlib.patches as mpatches
 
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
-def find_most_altered_genes(df_cohort_qc, df_results, cancer_type, top_n=20):
-    df_cancer = df_cohort_qc[df_cohort_qc['primary_site'] == cancer_type]
-    samples = df_cancer['tumor_sample'].unique() 
-    df_cancer_results = df_results[df_results['sample'].isin(samples)]
-
-    # Count the number of alterations per gene
-    gene_counts = df_cancer_results['track'].value_counts()
-
-    # Find the top N most
-    top_genes = gene_counts.head(top_n).index.tolist()
-    return top_genes
-
 def plot_oncoprint_arm_level_cna_on_axis_patches(
-    df_cohort_qc, 
-    cancer_type, 
+    df_arm_level, 
+    samples, 
     tcn_lcn_targets, 
-    wgd,
     ax,
+    color_all_cn_states=False, 
     return_order=False, 
     use_order=None,
     add_line=None,
@@ -43,19 +31,8 @@ def plot_oncoprint_arm_level_cna_on_axis_patches(
     Returns the final sorted sample order if return_order=True.
     """
 
-    # -----------------------------
-    # 1) Filter data
-    # -----------------------------
-    df_cancer = df_cohort_qc[df_cohort_qc['primary_site'] == cancer_type]
-    df_cancer = df_cancer[df_cancer['wgd'] == wgd]
-    df_cancer.index = df_cancer['tumor_sample']
-    
-    # We will store an integer-coded matrix indicating which (tcn, lcn) 
-    # triggered the cell to be "1". 0 => no CNA for that cell.
-    df_combo = None
-
     # Create a color dictionary for each (tcn, lcn). 
-    if not wgd: 
+    if not color_all_cn_states: 
         color_palette = ['#ca0020','#ededed','#92c5de','#0571b0'][::-1] 
         tcn_lcn_order = [(1,0), (2,0), (2,1), (3,1)]
     else: 
@@ -66,19 +43,31 @@ def plot_oncoprint_arm_level_cna_on_axis_patches(
     for idx, (tcn_val, lcn_val) in enumerate(tcn_lcn_order):
         color_for_tuple[(tcn_val, lcn_val)] = color_palette[idx % len(color_palette)]
 
-    # -----------------------------
-    # 2) Build integer-coded matrix
-    # -----------------------------
+    unique_arms =  [f"{arm}{suffix}" for arm in range(1,23) for suffix in ['p','q']]
+    # Rows = arms, Columns = samples (the input parameter)
+    df_combo = pd.DataFrame(
+        data=0,
+        index=unique_arms,  # each arm is a row
+        columns=samples      # each sample is a column
+    )
+
+    # 2c) For each (tcn_one, lcn_one) target, assign an integer ID = idx
     for idx, (tcn_one, lcn_one) in enumerate(tcn_lcn_targets, start=1):
-        col_name = f"{tcn_one}_{lcn_one}_proportion_per_chrom_arm"
-        data_cleaned = df_cancer[col_name].apply(lambda x: x if isinstance(x, dict) else {})
-        df_arm_level = pd.DataFrame(data_cleaned.tolist(), index=df_cancer.index)
+        # Filter rows that match this (tcn, lcn) AND have frac_of_arm >= 0.5
+        mask = (
+            (df_arm_level['tcn'] == tcn_one) &
+            (df_arm_level['lcn'] == lcn_one) &
+            (df_arm_level['frac_of_arm'] >= 0.5)
+        )
+        subset = df_arm_level[mask]
 
-        if df_combo is None:
-            df_combo = pd.DataFrame(0, index=df_arm_level.index, columns=df_arm_level.columns)
-
-        mask = df_arm_level > 0.5
-        df_combo = df_combo.where(~mask, other=df_combo.where(df_combo != 0, idx))
+        # For each row in that subset, fill df_combo with idx
+        # Only fill if the cell is currently 0 (i.e., not already assigned)
+        for row in subset.itertuples(index=False):
+            # row => (sample, arm, tcn, lcn, cn_length, arm_length, frac_of_arm, cn_state, ...)
+            if row.sample in df_combo.columns and row.arm in df_combo.index:
+                if df_combo.at[row.arm, row.sample] == 0:
+                    df_combo.at[row.arm, row.sample] = idx
 
     if df_combo is None:
         return
@@ -87,9 +76,6 @@ def plot_oncoprint_arm_level_cna_on_axis_patches(
     acrocentric_arms = ['13p', '14p', '15p', '21p', '22p']
     arms_to_drop = [arm for arm in acrocentric_arms if arm in df_combo.columns]
     df_combo.drop(columns=arms_to_drop, errors='ignore', inplace=True)
-
-    # Transpose => rows=arms, cols=samples
-    df_combo = df_combo.T
 
     # -------------------------------------------------------------------
     # 3) SORT COLUMNS (NEW oncoprint-style LOGIC FROM plot_oncoprint_arm_level_cna)
@@ -186,8 +172,6 @@ def plot_oncoprint_arm_level_cna_on_axis_patches(
         ax.text(-len(df_combo.columns) * 0.03, i+0.5, f"{int(pct)}%", ha="right", va="center")
 
     ax.set_aspect('auto')
-    title_str = f"{cancer_type} - {tcn_lcn_targets} - WGD{'+' if wgd else '-'}"
-    ax.set_title(title_str)
 
     # -----------------------------
     # 6) Add legend at the bottom
@@ -206,207 +190,6 @@ def plot_oncoprint_arm_level_cna_on_axis_patches(
         fancybox=True,
         shadow=False,
         ncol=len(tcn_lcn_targets)  
-    )
-
-    if return_order:
-        return df_combo.columns.tolist()
-
-def plot_clustering_arm_level_cna_on_axis_patches(
-    df_cohort_qc, 
-    cancer_type, 
-    tcn_lcn_targets, 
-    wgd,
-    ax,
-    return_order=False, 
-    use_order=None,
-    add_line=None
-):
-    """
-    Plots the CNA matrix using patches, assigning a DISTINCT color 
-    to each (tcn, lcn) combination. A legend at the bottom shows
-    the color <-> (tcn, lcn) mapping.
-
-    Returns the final sorted sample order if return_order=True.
-    """
-
-    # -----------------------------
-    # 1) Filter data
-    # -----------------------------
-    df_cancer = df_cohort_qc[df_cohort_qc['primary_site'] == cancer_type]
-    df_cancer = df_cancer[df_cancer['wgd'] == wgd]
-    df_cancer.index = df_cancer['tumor_sample']
-    
-    # We will store an integer-coded matrix indicating which (tcn, lcn) 
-    # triggered the cell to be "1". 0 => no CNA for that cell.
-    df_combo = None
-
-    # Create a color dictionary for each (tcn, lcn). 
-    
-    # continuous color map 
-    # color_palette = ['#fceabb', '#dde0ae', '#bdd6a7', '#9ccaa4', '#7cbea5', '#5eb1a7', '#43a2a9', '#2f93a9', '#2b83a6', '#36729e'] 
-    
-    # diverging color map, different for wgd+ and wgd- 
-    if not wgd: 
-        color_palette = ['#ca0020','#ededed','#92c5de','#0571b0'][::-1] # replace 2:1 #f4a582 into whitesmoke 
-        tcn_lcn_order = [(1,0), (2,0), (2,1), (3,1)]
-    else: 
-        color_palette = ['#67001f','#b2182b','#d6604d','#f4a582','#fddbc7','#d1e5f0','#92c5de','#ededed','#2166ac','#053061'][::-1] # replace 2:1 #4393c3 into whitesmoke 
-        tcn_lcn_order = [(1, 0), (2, 0), (2, 1), (3, 0), (3, 1), (4, 1), (4, 2), (5, 1), (5, 2), (6, 2)]  
-    color_for_tuple = {} 
-    for idx, (tcn_val, lcn_val) in enumerate(tcn_lcn_order):
-        color_for_tuple[(tcn_val, lcn_val)] = color_palette[idx % len(color_palette)]
-
-    # -----------------------------
-    # 2) Build integer-coded matrix
-    # -----------------------------
-    # Instead of a boolean OR, each cell stores either 0 or 
-    # the integer index of the first (tcn,lcn) combo that sets it to > 0.5
-    # We'll do this in the *rows=samples, cols=arms* orientation for now.
-    
-    all_arms = set()  # track all arms encountered
-    for idx, (tcn_one, lcn_one) in enumerate(tcn_lcn_targets, start=1):
-        col_name = f"{tcn_one}_{lcn_one}_proportion_per_chrom_arm"
-        data_cleaned = df_cancer[col_name].apply(lambda x: x if isinstance(x, dict) else {})
-        df_arm_level = pd.DataFrame(data_cleaned.tolist(), index=df_cancer.index)
-        if df_combo is None:
-            # Initialize df_combo with zeros (meaning no CNA)
-            df_combo = pd.DataFrame(0, index=df_arm_level.index, columns=df_arm_level.columns)
-        
-        # For each cell > 0.5, if df_combo is still 0 (meaning not claimed yet), 
-        # set to idx (the numeric label for this combo).
-        mask = df_arm_level > 0.5
-        df_combo = df_combo.where(~mask, other=df_combo.where(df_combo != 0, idx))
-        
-        all_arms.update(df_arm_level.columns)
-
-    # If some arms are not used, it's okay. We'll drop acrocentric next.
-    if df_combo is None:
-        # Means no data found
-        return
-
-    # Remove acrocentric arms if present
-    acrocentric_arms = ['13p', '14p', '15p', '21p', '22p']
-    arms_to_drop = [arm for arm in acrocentric_arms if arm in df_combo.columns]
-    df_combo.drop(columns=arms_to_drop, errors='ignore', inplace=True)
-
-    # Transpose so rows=arms, cols=samples (like your original code)
-    df_combo = df_combo.T
-
-    # -----------------------------
-    # 3) Sort columns
-    # -----------------------------
-    sorted_columns = df_combo.columns.tolist()
-    for arm in df_combo.index[::-1]:
-        # For each arm, reorder columns so that columns with higher 
-        # integer values appear on the left. 
-        # (You might want to sort by "non-zero count" or something else.)
-        # We'll do a simple approach: sum of the cell value => left. 
-        # Actually, if you want it strictly like your old approach 
-        # (which sorted by 1 vs 0), you can do "ascending=False".
-        # We'll treat non-zero as '1', zero as '0'.
-        row_vals = (df_combo.loc[arm, sorted_columns] != 0).astype(int)
-        sorted_cols = row_vals.sort_values(ascending=False).index.tolist()
-        sorted_columns = sorted_cols
-    
-    # Possibly reorder by 17p
-    if (not wgd) and tcn_lcn_targets == [(3,1)]:
-        row_vals_7p = (df_combo.loc['7p', sorted_columns] != 0).astype(int) 
-        sorted_columns = row_vals_7p.sort_values(ascending=False).index.tolist()
-    else: 
-        row_vals_17p = (df_combo.loc['17p', sorted_columns] != 0).astype(int)
-        sorted_columns = row_vals_17p.sort_values(ascending=False).index.tolist()
-
-    if use_order:
-        sorted_columns = use_order
-
-    df_combo = df_combo[sorted_columns]
-
-    if (not wgd) and tcn_lcn_targets == [(3,1)]: 
-        new_index = ['7p'] + [arm for arm in df_combo.index if arm != '7p'] # sort by gain order for wgd- 
-        df_combo = df_combo.reindex(new_index) 
-    else: 
-        new_index = ['17p'] + [arm for arm in df_combo.index if arm != '17p'] # sort by alteration level 
-        df_combo = df_combo.reindex(new_index)
-    
-    # -----------------------------
-    # 4) Compute % of non-zero in each row
-    # -----------------------------
-    # fraction of non-zero cells for each arm
-    alteration_percentages = (df_combo != 0).mean(axis=1) * 100
-
-    # -----------------------------
-    # 5) Plot
-    # -----------------------------
-    arms = df_combo.index.tolist()
-    samples = df_combo.columns.tolist()
-    n_rows, n_cols = len(arms), len(samples)
-
-    patches_list = []
-    facecolors = []
-    for i, arm in enumerate(arms):
-        for j, sample in enumerate(samples):
-            val = df_combo.at[arm, sample]
-            # 0 => no CNA => white
-            if val == 0:
-                color = 'white'
-            else:
-                # val is an integer label for the (tcn,lcn) combo
-                combo_idx = val - 1  # index into tcn_lcn_targets
-                combo_key = tcn_lcn_targets[combo_idx]
-                color = color_for_tuple[combo_key]
-            
-            rect = Rectangle((j, i), 1, 1)
-            patches_list.append(rect)
-            facecolors.append(color)
-
-    # Create a PatchCollection
-    pc = PatchCollection(
-        patches_list, 
-        facecolor=facecolors,
-        linewidths=0.5
-    )
-    ax.add_collection(pc)
-
-    # Add vertical line if needed
-    if add_line is not None:
-        ax.axvline(x=add_line, color='red', linestyle='-', linewidth=1)
-
-    # Axis adjustments
-    ax.set_xlim(0, n_cols)
-    ax.set_ylim(0, n_rows)
-    ax.invert_yaxis()
-    ax.set_yticks(np.arange(n_rows) + 0.5)
-    ax.set_yticklabels(arms)
-    tick_positions = np.arange(0, n_cols, 250) 
-    ax.set_xticks(tick_positions)               
-    ax.set_xticklabels(tick_positions)    
-
-    # Add alteration percentages
-    for i, (arm, pct) in enumerate(zip(arms, alteration_percentages)):
-        ax.text(-len(df_combo.columns) * 0.03, i+0.5, f"{int(pct)}%", ha="right", va="center")
-
-    ax.set_aspect('auto')
-    title_str = f"{cancer_type} - {tcn_lcn_targets} - WGD{'+' if wgd else '-'}"
-    ax.set_title(title_str)
-
-    # -----------------------------
-    # 6) Add legend at the bottom
-    # -----------------------------
-    # Build legend patches for each (tcn,lcn).
-    legend_handles = []
-    for (tcn_val, lcn_val) in tcn_lcn_targets:
-        c = color_for_tuple[(tcn_val, lcn_val)]
-        label_txt = f"({tcn_val}, {lcn_val})"
-        legend_patch = mpatches.Patch(facecolor=c, edgecolor='white', label=label_txt)
-        legend_handles.append(legend_patch)
-
-    ax.legend(
-        handles=legend_handles,
-        loc='upper center',
-        bbox_to_anchor=(0.5, -0.05),  # move legend below the axis
-        fancybox=True,
-        shadow=False,
-        ncol=len(tcn_lcn_targets)  # all combos in one row
     )
 
     if return_order:
@@ -710,12 +493,12 @@ def plot_oncoprint_fast(df: pd.DataFrame,
 
 # now, plot the clustering arm level cna first, then plot the oncoprint with the same order 
 def plot_cna_and_oncoprint_combined(
-    df_cohort_qc,
+    df_arm_level,
     df_oncoprint,
+    samples, 
     genes, 
-    cancer_type,
     tcn_lcn_targets,
-    wgd=False, 
+    color_all_cn_states=False, 
     use_order=None, 
     add_line=None, 
     sort_arm='17p'
@@ -726,22 +509,35 @@ def plot_cna_and_oncoprint_combined(
     3) Plots the oncoprint on the bottom axis with the same sample order.
     """
 
-    fig, (ax_top, ax_bottom) = plt.subplots(nrows=2, figsize=(20, 12))
+    # -- Dynamically compute the figure height for the bottom plot --
+    # Each gene => about 0.3 height units, then round
+    bottom_height = round(0.3 * len(genes))  
+    # We'll add a fixed height (e.g., 5) for the top plot
+    top_height = 6
+    fig_height = top_height + bottom_height
+
+    # Create the figure and two subplots
+    fig, (ax_top, ax_bottom) = plt.subplots(
+        nrows=2,
+        figsize=(20, fig_height),
+        gridspec_kw={"height_ratios": [top_height, bottom_height]}
+)
 
     # 1) Plot CNA on the top axis; get the final sorted sample order
     sorted_cols = plot_oncoprint_arm_level_cna_on_axis_patches(
-        df_cohort_qc=df_cohort_qc,
-        cancer_type=cancer_type,
+        df_arm_level=df_arm_level,
+        samples=samples,
         tcn_lcn_targets=tcn_lcn_targets,
-        wgd=wgd,
+        color_all_cn_states=color_all_cn_states,
         ax=ax_top,
-        return_order=True,  # IMPORTANT: so we get the columns
+        return_order=True,  # so we get the columns
         use_order=use_order,
         add_line=add_line, 
         sort_arm=sort_arm
     )
 
-    # 2) Plot the oncoprint with the final filtered and sorted data
+    # 2) Plot the oncoprint on the bottom axis with the final sorted sample order
+    #    Note: We do NOT pass figsize here, since we're already using subplots()
     plot_oncoprint_fast(
         df=df_oncoprint,
         genes=genes, 
@@ -750,19 +546,8 @@ def plot_cna_and_oncoprint_combined(
         event_col='event',
         row_gap=0.1,
         sample_order=sorted_cols,  # align columns
-        ax=ax_bottom,              # draw on bottom axis
-        figsize=(20, 6)
+        ax=ax_bottom  # draw on bottom axis
     )
 
     plt.tight_layout()
     plt.show()
-
-# # example usage 
-# plot_cna_and_oncoprint_combined(
-#     df_cohort_qc=df_cohort_qc_colon_mss,   # your CNA data
-#     df_oncoprint=df_results,     # your oncoprint (mutations, CNAs, etc.)
-#     cancer_type='Colon',
-#     tcn_lcn_targets=[(1,0)],
-#     wgd=False
-# )
-
