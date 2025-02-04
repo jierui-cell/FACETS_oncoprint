@@ -1,5 +1,7 @@
 ## Overview
 
+**Generates FACETS integer copy number and genomic alterations for MSK-IMPACT patients in oncoprint format simultaneously.** 
+
 This repository contains example code for:
 1.	Generating alteration tables (mutations, fusions, copy-number events) from cBioPortal-style files.
 2.	Creating arm-level CNA clustering visualizations.
