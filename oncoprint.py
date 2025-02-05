@@ -44,6 +44,9 @@ def plot_oncoprint_arm_level_cna_on_axis_patches(
         color_for_tuple[(tcn_val, lcn_val)] = color_palette[idx % len(color_palette)]
 
     unique_arms =  [f"{arm}{suffix}" for arm in range(1,23) for suffix in ['p','q']]
+    # remove all acrocentric arms 
+    acrocentric_arms = ['13p', '14p', '15p', '21p', '22p']
+    unique_arms = [arm for arm in unique_arms if arm not in acrocentric_arms] 
     # Rows = arms, Columns = samples (the input parameter)
     df_combo = pd.DataFrame(
         data=0,
@@ -71,11 +74,6 @@ def plot_oncoprint_arm_level_cna_on_axis_patches(
 
     if df_combo is None:
         return
-
-    # Remove acrocentric arms if present
-    acrocentric_arms = ['13p', '14p', '15p', '21p', '22p']
-    arms_to_drop = [arm for arm in acrocentric_arms if arm in df_combo.columns]
-    df_combo.drop(columns=arms_to_drop, errors='ignore', inplace=True)
 
     # -------------------------------------------------------------------
     # 3) SORT COLUMNS (NEW oncoprint-style LOGIC FROM plot_oncoprint_arm_level_cna)
